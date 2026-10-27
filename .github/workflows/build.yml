@@ -1,0 +1,77 @@
+name: Build
+on: [push, workflow_dispatch]
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      android: ${{ steps.z.outputs.android }}
+      desktop: ${{ steps.z.outputs.desktop }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Unzip the most recently uploaded project zip
+        id: z
+        run: |
+          newest=""; newest_t=0
+          for f in *.zip; do
+            t=$(git log -1 --format=%ct -- "$f")
+            echo "found: $f (committed at $t)"
+            if [ "$t" -gt "$newest_t" ]; then newest_t=$t; newest="$f"; fi
+          done
+          echo "USING: $newest"
+          unzip -q "$newest" -d src
+          echo "android=$([ -d src/SearchHubAndroid ] && echo 1 || echo 0)" >> "$GITHUB_OUTPUT"
+          echo "desktop=$([ -d src/SearchHubDesktop ] && echo 1 || echo 0)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: src
+          path: src
+          retention-days: 1
+
+  android:
+    needs: prepare
+    if: needs.prepare.outputs.android == '1'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: src, path: . }
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 17 }
+      - name: Accept Android licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: "8.9" }
+      - name: Build
+        working-directory: SearchHubAndroid
+        run: gradle :app:assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SearchHub-debug-apk
+          path: SearchHubAndroid/app/build/outputs/apk/debug/*.apk
+
+  desktop:
+    needs: prepare
+    if: needs.prepare.outputs.desktop == '1'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: src, path: . }
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - name: Build
+        working-directory: SearchHubDesktop
+        shell: bash
+        run: |
+          npm install
+          npx electron-builder --publish never
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SearchHub-desktop-${{ matrix.os }}
+          path: |
+            SearchHubDesktop/dist/*.exe
+            SearchHubDesktop/dist/*.dmg
+            SearchHubDesktop/dist/*.AppImage
